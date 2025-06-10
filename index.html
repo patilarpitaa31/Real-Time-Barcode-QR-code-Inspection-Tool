@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Barcode & QR Code Quality Inspection</title>
+  <style>
+    body { font-family: Arial, sans-serif; background: #f2f2f2; margin: 0; padding: 0; }
+    #container { max-width: 900px; margin: 30px auto; background: #fff; border-radius: 10px; box-shadow: 0 4px 24px rgba(0,0,0,0.10); padding: 30px; }
+    h1 { text-align: center; margin-bottom: 20px; }
+    #feed-area { display: flex; align-items: flex-start; gap: 20px; justify-content: center; }
+    #video-wrap { position: relative; width: 480px; height: 360px; }
+    #video, #overlay { position: absolute; top: 0; left: 0; width: 480px; height: 360px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.08); }
+    #log-panel { width: 350px; background: #f8f8f8; border-radius: 8px; padding: 10px; height: 360px; overflow-y: auto; font-size: 14px; box-shadow: 0 1px 4px rgba(0,0,0,0.05); }
+    .log-row { margin-bottom: 8px; padding: 6px; border-radius: 4px; background: #e1f5fe; border-left: 4px solid #039be5; }
+    .log-row.error { background: #ffcdd2; border-left: 4px solid #d32f2f; }
+    .log-row.ok { background: #c8e6c9; border-left: 4px solid #388e3c; }
+    #product-details { margin-top: 20px; background: #f8f8f8; border-radius: 8px; padding: 10px; font-size: 14px; box-shadow: 0 1px 4px rgba(0,0,0,0.05); }
+    #product-details h3 { margin: 0 0 10px; }
+    #product-details p { margin: 5px 0; }
+    #product-details a { color: #0288d1; text-decoration: underline; }
+    #controls { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
+    #controls button { padding: 8px; border: none; border-radius: 4px; cursor: pointer; color: white; font-size: 14px; }
+    #scan-button { background: #0288d1; }
+    #scan-button:hover { background: #01579b; }
+    #clear-history { background: #d32f2f; }
+    #clear-history:hover { background: #b71c1c; }
+    #export-json { background: #0288d1; }
+    #export-json:hover { background: #01579b; }
+    #export-csv { background: #388e3c; }
+    #export-csv:hover { background: #2e7d32; }
+    #export-excel { background: #0288d1; }
+    #export-excel:hover { background: #01579b; }
+    #scan-counter { margin-top: 10px; font-weight: bold; }
+    #product-counter { margin-top: 5px; font-weight: bold; }
+    #toast { position: fixed; bottom: 20px; right: 20px; background: #333; color: white; padding: 10px 20px; border-radius: 5px; opacity: 0; transition: opacity 0.5s; z-index: 1000; }
+    #toast.show { opacity: 1; }
+    @keyframes glow { 0% { box-shadow: 0 0 5px rgba(255, 255, 0, 0.5); } 50% { box-shadow: 0 0 20px rgba(255, 255, 0, 1); } 100% { box-shadow: 0 0 5px rgba(255, 255, 0, 0.5); } }
+  </style>
+</head>
+<body>
+  <div id="container">
+    <h1>Barcode & QR Code Quality Inspection</h1>
+    <div id="feed-area">
+      <div id="video-wrap">
+        <video id="video" autoplay playsinline></video>
+        <canvas id="overlay"></canvas>
+      </div>
+      <div id="log-panel">
+        <strong>Scan Log</strong>
+        <div id="scan-counter">Total Scanned: 0</div>
+        <div id="product-counter">Unique Products Scanned: 0</div>
+        <div id="log-entries"></div>
+        <div id="controls">
+          <!-- Scan button removed for real-time mode -->
+          <button id="clear-history">Clear History</button>
+          <button id="export-json">Export JSON</button>
+          <button id="export-csv">Export CSV</button>
+          <button id="export-excel">Export Excel</button>
+        </div>
+        <div id="product-details">
+          <h3>Product Details</h3>
+          <p>No product selected</p>
+        </div>
+      </div>
+    </div>
+    <div id="toast"></div>
+  </div>
+
+  <!-- jsQR for QR code detection -->
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+  <!-- QuaggaJS for barcode detection -->
+  <script src="https://cdn.jsdelivr.net/npm/quagga@0.12.1/dist/quagga.min.js"></script>
+  <!-- SheetJS for Excel export -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script>
+    const video = document.getElementById('video');
+    const overlay = document.getElementById('overlay');
+    const overlayCtx = overlay.getContext('2d');
+    const logPanel = document.getElementById('log-entries');
+    const scanCounter = document.getElementById('scan-counter');
+    const productCounter = document.getElementById('product-counter');
+    const productDetails = document.getElementById('product-details');
+    const clearHistoryBtn = document.getElementById('clear-history');
+    const exportJsonBtn = document.getElementById('export-json');
+    const exportCsvBtn = document.getElementById('export-csv');
+    const exportExcelBtn = document.getElementById('export-excel');
+    const toast = document.getElementById('toast');
+
+    // Mock product database (fallback)
+    const productDatabase = {
+      'https://example.com': { name: 'Sample QR Product', price: 29.99, description: 'A sample QR-linked product' },
+      '123456789': { name: 'Sample Barcode Product', price: 19.99, description: 'A sample barcode product (UPC)' },
+      '9781234567890': { name: 'Book', price: 15.50, description: 'A sample EAN book barcode' },
+      'CODE128TEST': { name: 'Test Code 128', price: 9.99, description: 'A sample Code 128 barcode' }
+    };
+
+    // Google Custom Search API settings (replace with your own)
+    const GOOGLE_API_KEY = 'YOUR API KEY'; // Replace!
+    const GOOGLE_CSE_ID = 'YOUR SEARCH ENGINE ID'; // Replace!
+
+    // Load saved scans from localStorage
+    let scanHistory = JSON.parse(localStorage.getItem('scanHistory')) || [];
+    let lastScannedCodes = new Map();
+    let uniqueProducts = new Set();
+    let totalScanned = scanHistory.length;
+    let isScanning = false;
+    let quaggaInitialized = false;
+
+    scanHistory.forEach(entry => {
+      const code = entry.message.match(/^(QR|Barcode): (.+?) \(/)?.[2];
+      if (code) uniqueProducts.add(code);
+    });
+
+    function updateCounters() {
+      scanCounter.textContent = `Total Scanned: ${totalScanned}`;
+      productCounter.textContent = `Unique Products Scanned: ${uniqueProducts.size}`;
+    }
+
+    function showToast(message) {
+      toast.textContent = message;
+      toast.classList.add('show');
+      setTimeout(() => toast.classList.remove('show'), 3000);
+    }
+
+    async function fetchProductFromGoogle(code, type) {
+      if (!GOOGLE_API_KEY || !GOOGLE_CSE_ID || GOOGLE_API_KEY === 'YOUR_GOOGLE_API_KEY') {
+        console.warn('Google API key or CSE ID missing. Using mock database.');
+        return null;
+      }
+      try {
+        const query = type === 'QR' ? code : `UPC ${code} product`;
+        const response = await fetch(
+          `https://www.googleapis.com/customsearch/v1?key=${GOOGLE_API_KEY}&cx=${GOOGLE_CSE_ID}&q=${encodeURIComponent(query)}`
+        );
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        const firstItem = data.items?.[0];
+        if (firstItem) {
+          return {
+            name: firstItem.title || 'Unknown Product',
+            price: 'N/A',
+            description: firstItem.snippet || 'No details available',
+            link: firstItem.link || ''
+          };
+        }
+        return null;
+      } catch (e) {
+        console.error('Google API error:', e);
+        showToast('Failed to fetch product from Google');
+        return null;
+      }
+    }
+
+    async function displayProductDetails(code, type) {
+      let product = productDatabase[code];
+      let source = 'Mock Database';
+      if (!product) {
+        product = await fetchProductFromGoogle(code, type);
+        source = product ? 'Google' : 'Unknown';
+      }
+      product = product || { name: 'Unknown Product', price: 'N/A', description: 'No details available', link: '' };
+      productDetails.innerHTML = `
+        <h3>Product Details</h3>
+        <p><strong>Code:</strong> ${code}</p>
+        <p><strong>Name:</strong> ${product.name}</p>
+        <p><strong>Price:</strong> $${product.price}</p>
+        <p><strong>Description:</strong> ${product.description}</p>
+        ${product.link ? `<p><strong>Google Link:</strong> <a href="${product.link}" target="_blank">${product.link}</a></p>` : ''}
+        <p><strong>Source:</strong> ${source}</p>
+      `;
+    }
+
+    function loadScanHistory() {
+      logPanel.innerHTML = '';
+      scanHistory.forEach(entry => {
+        const row = document.createElement('div');
+        row.className = `log-row ${entry.status}`;
+        row.textContent = `${entry.timestamp} - ${entry.message}`;
+        logPanel.appendChild(row);
+      });
+      updateCounters();
+    }
+
+    function logResult(type, data, status, location = null) {
+      const timestamp = new Date().toLocaleTimeString('en-US', { timeZone: 'Asia/Kolkata' });
+      const message = `${type}: ${data} (${status ? 'Blurry' : 'OK'}; Var=${status ? status.lapVar : 0})`;
+      const entry = { timestamp, type, message, status: status ? 'error' : 'ok', location };
+      scanHistory.unshift(entry);
+      if (scanHistory.length > 20) scanHistory.pop();
+      localStorage.setItem('scanHistory', JSON.stringify(scanHistory));
+
+      const row = document.createElement('div');
+      row.className = `log-row ${status ? 'error' : 'ok'}`;
+      row.textContent = `${timestamp} - ${message}`;
+      logPanel.prepend(row);
+      if (logPanel.children.length > 20) logPanel.removeChild(logPanel.lastChild);
+
+      totalScanned++;
+      uniqueProducts.add(data);
+      updateCounters();
+      showToast(`New ${type} scanned: ${data}`);
+
+      displayProductDetails(data, type);
+    }
+
+    clearHistoryBtn.addEventListener('click', () => {
+      scanHistory = [];
+      lastScannedCodes.clear();
+      uniqueProducts.clear();
+      totalScanned = 0;
+      localStorage.removeItem('scanHistory');
+      logPanel.innerHTML = '';
+      productDetails.innerHTML = '<h3>Product Details</h3><p>No product selected</p>';
+      updateCounters();
+      showToast('Scan history cleared');
+    });
+
+    exportJsonBtn.addEventListener('click', () => {
+      const data = JSON.parse(localStorage.getItem('scanHistory') || '[]');
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `scan_history_${new Date().toISOString().split('T')[0]}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast('Exported to JSON');
+    });
+
+    exportCsvBtn.addEventListener('click', () => {
+      const data = JSON.parse(localStorage.getItem('scanHistory') || '[]');
+      const csv = [
+        'Timestamp,Type,Message,Status,TopLeftX,TopLeftY,TopRightX,TopRightY,BottomRightX,BottomRightY,BottomLeftX,BottomLeftY',
+        ...data.map(entry => 
+          `"${entry.timestamp}","${entry.type}","${entry.message.replace(/"/g, '""')}","${entry.status}",` +
+          `${entry.location?.topLeftCorner?.x || entry.location?.box?.[0][0] || ''},` +
+          `${entry.location?.topLeftCorner?.y || entry.location?.box?.[0][1] || ''},` +
+          `${entry.location?.topRightCorner?.x || entry.location?.box?.[1][0] || ''},` +
+          `${entry.location?.topRightCorner?.y || entry.location?.box?.[1][1] || ''},` +
+          `${entry.location?.bottomRightCorner?.x || entry.location?.box?.[2][0] || ''},` +
+          `${entry.location?.bottomRightCorner?.y || entry.location?.box?.[2][1] || ''},` +
+          `${entry.location?.bottomLeftCorner?.x || entry.location?.box?.[3][0] || ''},` +
+          `${entry.location?.bottomLeftCorner?.y || entry.location?.box?.[3][1] || ''}`
+        )
+      ].join('\n');
+      const blob = new Blob([csv], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `scan_history_${new Date().toISOString().split('T')[0]}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast('Exported to CSV');
+    });
+
+    exportExcelBtn.addEventListener('click', () => {
+      const data = JSON.parse(localStorage.getItem('scanHistory') || '[]');
+      const worksheetData = [
+        ['Timestamp', 'Type', 'Message', 'Status', 'TopLeftX', 'TopLeftY', 'TopRightX', 'TopRightY', 'BottomRightX', 'BottomRightY', 'BottomLeftX', 'BottomLeftY'],
+        ...data.map(entry => [
+          entry.timestamp,
+          entry.type,
+          entry.message,
+          entry.status,
+          entry.location?.topLeftCorner?.x || entry.location?.box?.[0][0] || '',
+          entry.location?.topLeftCorner?.y || entry.location?.box?.[0][1] || '',
+          entry.location?.topRightCorner?.x || entry.location?.box?.[1][0] || '',
+          entry.location?.topRightCorner?.y || entry.location?.box?.[1][1] || '',
+          entry.location?.bottomRightCorner?.x || entry.location?.box?.[2][0] || '',
+          entry.location?.bottomRightCorner?.y || entry.location?.box?.[2][1] || '',
+          entry.location?.bottomLeftCorner?.x || entry.location?.box?.[3][0] || '',
+          entry.location?.bottomLeftCorner?.y || entry.location?.box?.[3][1] || ''
+        ])
+      ];
+      const worksheet = XLSX.utils.aoa_to_sheet(worksheetData);
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, 'ScanHistory');
+      XLSX.writeFile(workbook, `scan_history_${new Date().toISOString().split('T')[0]}.xlsx`);
+      showToast('Exported to Excel');
+    });
+
+    // Webcam and QuaggaJS
+    navigator.mediaDevices.getUserMedia({ video: { width: 480, height: 360 } })
+      .then(stream => {
+        video.srcObject = stream;
+        video.onloadedmetadata = () => {
+          overlay.width = video.videoWidth;
+          overlay.height = video.videoHeight;
+          loadScanHistory();
+          Quagga.init({
+            inputStream: {
+              name: 'Live',
+              type: 'LiveStream',
+              target: video,
+              constraints: { width: 480, height: 360 }
+            },
+            decoder: {
+              readers: ['code_128_reader', 'ean_reader', 'upc_reader'],
+              multiple: true
+            },
+            locate: true
+          }, err => {
+            if (err) {
+              console.error('Quagga init error:', err);
+              showToast('Failed to initialize barcode scanner');
+              return;
+            }
+            quaggaInitialized = true;
+            Quagga.start();
+            showToast('Barcode scanner initialized');
+            realtimeScanLoop(); // Start real-time scanning after init
+          });
+        };
+      })
+      .catch(err => {
+        console.error('Webcam access error:', err);
+        showToast('Could not access webcam');
+      });
+
+    function analyzeQuality(imageData) {
+      let gray = [];
+      for (let i = 0; i < imageData.data.length; i += 4) {
+        gray.push(
+          0.299 * imageData.data[i] +
+          0.587 * imageData.data[i + 1] +
+          0.114 * imageData.data[i + 2]
+        );
+      }
+      let mean = gray.reduce((a, b) => a + b, 0) / gray.length;
+      let lapVar = gray.reduce((acc, val) => acc + Math.pow(val - mean, 2), 0) / gray.length;
+      let blurry = lapVar < 100;
+      return { blurry, lapVar: Math.round(lapVar) };
+    }
+
+    function drawLine(ctx, begin, end, color, isDashed = false) {
+      ctx.beginPath();
+      if (isDashed) ctx.setLineDash([5, 5]);
+      ctx.moveTo(begin.x, begin.y);
+      ctx.lineTo(end.x, end.y);
+      ctx.lineWidth = 4;
+      ctx.strokeStyle = color;
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    function maskRegion(imageData, minX, minY, maxX, maxY) {
+      const data = imageData.data;
+      for (let y = Math.max(0, minY); y < Math.min(imageData.height, maxY); y++) {
+        for (let x = Math.max(0, minX); x < Math.min(imageData.width, maxX); x++) {
+          const i = (y * imageData.width + x) * 4;
+          data[i] = data[i + 1] = data[i + 2] = 0;
+          data[i + 3] = 255;
+        }
+      }
+      return imageData;
+    }
+
+    function detectMultipleQRCodes(imageData, maxAttempts = 3) {
+      const codes = [];
+      let tempImageData = new ImageData(
+        new Uint8ClampedArray(imageData.data),
+        imageData.width,
+        imageData.height
+      );
+      for (let i = 0; i < maxAttempts; i++) {
+        try {
+          const code = jsQR(tempImageData.data, tempImageData.width, tempImageData.height, {
+            inversionAttempts: i % 2 ? 'invertFirst' : 'dontInvert'
+          });
+          if (!code) break;
+          codes.push({ type: 'QR', data: code.data, location: code.location });
+          const minX = Math.min(code.location.topLeftCorner.x, code.location.bottomLeftCorner.x,
+                               code.location.topRightCorner.x, code.location.bottomRightCorner.x);
+          const minY = Math.min(code.location.topLeftCorner.y, code.location.bottomLeftCorner.y,
+                               code.location.topRightCorner.y, code.location.bottomRightCorner.y);
+          const maxX = Math.max(code.location.topLeftCorner.x, code.location.bottomLeftCorner.x,
+                               code.location.topRightCorner.x, code.location.bottomRightCorner.x);
+          const maxY = Math.max(code.location.topLeftCorner.y, code.location.bottomLeftCorner.y,
+                               code.location.topRightCorner.y, code.location.bottomRightCorner.y);
+          tempImageData = maskRegion(tempImageData, minX - 10, minY - 10, maxX + 10, maxY + 10);
+        } catch (e) {
+          console.error('QR detection error:', e);
+          break;
+        }
+      }
+      return codes;
+    }
+
+    function getBarcodeResults(timeout = 500) {
+      return new Promise(resolve => {
+        let barcodeResults = [];
+        const onDetectedHandler = result => {
+          const codes = Array.isArray(result) ? result : [result];
+          codes.forEach(codeResult => {
+            const code = codeResult.codeResult;
+            if (code) {
+              const box = codeResult.box || [[0, 0], [0, 0], [0, 0], [0, 0]];
+              barcodeResults.push({ type: 'Barcode', data: code.code, box });
+            }
+          });
+        };
+        Quagga.onDetected(onDetectedHandler);
+        setTimeout(() => {
+          Quagga.offDetected(onDetectedHandler);
+          resolve(barcodeResults);
+        }, timeout);
+      });
+    }
+
+    // Debounce to prevent repeated logs: only log when a code is not recently logged
+    const lastLogTimestamps = new Map();
+    const DEBOUNCE_INTERVAL = 2000; // ms
+
+    async function realtimeScanLoop() {
+      if (!quaggaInitialized || video.readyState !== video.HAVE_ENOUGH_DATA) {
+        requestAnimationFrame(realtimeScanLoop);
+        return;
+      }
+      if (isScanning) {
+        requestAnimationFrame(realtimeScanLoop);
+        return;
+      }
+      isScanning = true;
+
+      try {
+        overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
+        const tmpCanvas = document.createElement('canvas');
+        tmpCanvas.width = video.videoWidth;
+        tmpCanvas.height = video.videoHeight;
+        const tmpCtx = tmpCanvas.getContext('2d');
+        tmpCtx.drawImage(video, 0, 0, tmpCanvas.width, tmpCanvas.height);
+        const imageData = tmpCtx.getImageData(0, 0, tmpCanvas.width, tmpCanvas.height);
+
+        // Detect QR codes
+        const detectedCodes = detectMultipleQRCodes(imageData);
+
+        // Detect barcodes
+        const barcodes = await getBarcodeResults();
+        detectedCodes.push(...barcodes);
+
+        detectedCodes.forEach((code, index) => {
+          let minX, minY, maxX, maxY, w, h, color, location;
+          if (code.type === 'QR') {
+            minX = Math.min(code.location.topLeftCorner.x, code.location.bottomLeftCorner.x,
+                           code.location.topRightCorner.x, code.location.bottomRightCorner.x);
+            minY = Math.min(code.location.topLeftCorner.y, code.location.bottomLeftCorner.y,
+                           code.location.topRightCorner.y, code.location.bottomRightCorner.y);
+            maxX = Math.max(code.location.topLeftCorner.x, code.location.bottomLeftCorner.x,
+                           code.location.topRightCorner.x, code.location.bottomRightCorner.x);
+            maxY = Math.max(code.location.topLeftCorner.y, code.location.bottomLeftCorner.y,
+                           code.location.topRightCorner.y, code.location.bottomRightCorner.y);
+            w = Math.max(1, maxX - minX);
+            h = Math.max(1, maxY - minY);
+            location = code.location;
+          } else {
+            minX = code.box[0][0];
+            minY = code.box[0][1];
+            maxX = code.box[2][0];
+            maxY = code.box[2][1];
+            w = Math.max(1, maxX - minX);
+            h = Math.max(1, maxY - minY);
+            location = { box: code.box };
+          }
+
+          const codeImageData = tmpCtx.getImageData(minX, minY, w, h);
+          const { blurry, lapVar } = analyzeQuality(codeImageData);
+          color = blurry ? '#E53935' : '#43A047';
+
+          // Draw overlay
+          if (code.type === 'QR') {
+            drawLine(overlayCtx, code.location.topLeftCorner, code.location.topRightCorner, color);
+            drawLine(overlayCtx, code.location.topRightCorner, code.location.bottomRightCorner, color);
+            drawLine(overlayCtx, code.location.bottomRightCorner, code.location.bottomLeftCorner, color);
+            drawLine(overlayCtx, code.location.bottomLeftCorner, code.location.topLeftCorner, color);
+          } else {
+            overlayCtx.beginPath();
+            overlayCtx.moveTo(code.box[0][0], code.box[0][1]);
+            code.box.forEach(([x, y], i) => {
+              if (i > 0) drawLine(overlayCtx, code.box[i-1], code.box[i], color, true);
+            });
+            drawLine(overlayCtx, code.box[code.box.length-1], code.box[0], color, true);
+          }
+
+          overlayCtx.font = '18px Arial';
+          overlayCtx.fillStyle = color;
+          overlayCtx.fillText(`${code.type}: ${blurry ? 'Blurry' : 'OK'}`, minX, minY - 8);
+
+          // Debounce: only log if not recently scanned
+          const codeKey = `${code.type}_${code.data}`;
+          const now = Date.now();
+          if (!lastLogTimestamps.get(codeKey) || now - lastLogTimestamps.get(codeKey) > DEBOUNCE_INTERVAL) {
+            lastLogTimestamps.set(codeKey, now);
+            logResult(code.type, code.data, blurry ? { lapVar } : null, location);
+          }
+        });
+      } catch (e) {
+        console.error('Scan error:', e);
+        showToast('Scan failed: ' + e.message);
+      } finally {
+        isScanning = false;
+        requestAnimationFrame(realtimeScanLoop);
+      }
+    }
+
+    window.addEventListener('DOMContentLoaded', loadScanHistory);
+
+  </script>
+</body>
+</html>
