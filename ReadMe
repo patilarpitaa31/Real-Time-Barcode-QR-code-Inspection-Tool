@@ -1,3 +1,15 @@
 Real-Time Barcode & QR Code Quality is a browser-based inspection tool.
 It leverages your webcam to scan, analyze, and log barcodes and QR codes, providing instant feedback on code quality (sharpness/blurriness), product information, 
 and maintains a history of all scans. The application offers export options and does not require any server-side components.
+
+## Features
+
+- **Real-time Scanning:** Instantly detects barcodes and QR codes from your webcam feed, no button click needed.
+- **Quality Analysis:** Automatically inspects each detected code for blurriness using Laplacian variance and highlights issues visually.
+- **Multi-code Support:** Detects multiple QR codes and common barcode formats (Code 128, EAN, UPC) simultaneously.
+- **Product Lookup:** Fetches product information from a mock database or (optionally) via Google Custom Search API.
+- **Scan History:** Keeps a local log of scans, showing code type, value, timestamp, quality status, and location.
+- **Export Options:** Export your scan log as JSON, CSV, or Excel with a single click.
+- **Overlay Visualization:** Color-coded overlays (green for OK, red for blurry) on the video feed for instant feedback.
+- **No Server Required:** All processing is done in your browser; scan history is stored locally.
+- **Modern UI:** Clean, responsive interface with support for clearing history and live product detail popups.
